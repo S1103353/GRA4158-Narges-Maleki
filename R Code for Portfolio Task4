@@ -1,0 +1,101 @@
+---
+title: "Portfolio Task4 - Quasi-Experimental Analysis"
+author: "Narges"
+date: "2025-03-14"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+# Load required libraries
+library(tidyverse)
+library(ggplot2)
+library(fixest)       # Difference-in-Differences
+library(Synth)        # Synthetic Control Method
+library(gsynth)       # Synthetic DiD
+library(lubridate)    # Date formatting
+library(readr)        # To load CSV properly
+
+# Load CSV file
+df <- read_csv("/Users/narges/Downloads/GRA 4158/Task4/Store_data_2025.csv")
+
+# Rename and preprocess
+df <- df %>%
+  rename(store = storeNum, date = Date, week = WeekInd,
+         p1sales = p1Sales, p2sales = p2Sales, p1prom = p1Prom, p2prom = p2Prom) %>%
+  mutate(
+    date = as.Date(date),
+    store = as.factor(store),
+    post = ifelse(week >= min(week[p1prom == 1 & p1sales > 0]), 1, 0),
+    p1prom = as.factor(p1prom),
+    p2prom = as.factor(p2prom)
+  )
+
+# Pre-post analysis for store 109
+store109 <- df %>% filter(store == 109)
+
+# Pre-post regression for Product 1
+pre_post_p1 <- lm(p1sales ~ post + p1prom, data = store109)
+summary(pre_post_p1)
+
+# Pre-post regression for Product 2
+pre_post_p2 <- lm(p2sales ~ post + p2prom, data = store109)
+summary(pre_post_p2)
+
+# Difference-in-Differences (DiD)
+# DiD for Product 1
+did_p1 <- feols(p1sales ~ post * (store == 109) + p1prom | store + week, data = df)
+summary(did_p1)
+
+# DiD for Product 2
+did_p2 <- feols(p2sales ~ post * (store == 109) + p2prom | store + week, data = df)
+summary(did_p2)
+
+# Plot avg weekly sales
+df_avg <- df %>%
+  group_by(store, week) %>%
+  summarise(avg_sales = mean(p1sales), .groups = 'drop')
+
+ggplot(df_avg, aes(x = week, y = avg_sales, color = store)) +
+  geom_line() +
+  labs(title = "Product 1 Sales by Store", y = "Average Sales", x = "Week") +
+  theme_minimal()
+
+# Synthetic Control Method (SCM)
+df$store_num <- as.numeric(as.character(df$store))
+
+scm_data <- df %>% filter(week < 78)
+
+scm_out <- dataprep(
+  foo = scm_data,
+  predictors = "p1sales",
+  dependent = "p1sales",
+  unit.variable = "store_num",
+  time.variable = "week",
+  treatment.identifier = 109,
+  controls.identifier = unique(df$store_num[df$store_num != 109]),
+  time.predictors.prior = unique(scm_data$week),
+  time.optimize.ssr = unique(scm_data$week),
+  time.plot = unique(df$week)
+)
+
+synth_out <- synth(scm_out)
+synth.tables <- synth.tab(dataprep.res = scm_out, synth.res = synth_out)
+synth.tables
+
+path.plot(synth.res = synth_out, dataprep.res = scm_out,
+          Ylab = "Sales", Xlab = "Week", Legend = TRUE,
+          Main = "Synthetic Control Method - Store 109 vs Synthetic")
+
+# Synthetic DiD
+df$store <- as.factor(df$store)
+df$treatment <- ifelse(df$store == 109 & df$week >= 78, 1, 0)
+
+sdid_model <- gsynth(p1sales ~ treatment, data = df,
+                     index = c("store", "week"),
+                     force = "two-way", CV = TRUE, r = c(0, 5),
+                     se = TRUE, inference = "parametric", nboots = 100)
+
+plot(sdid_model)
+summary(sdid_model)
